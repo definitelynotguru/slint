@@ -2843,6 +2843,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                             dy: delta.max(Fixed(1)),
                             off_x: Fixed::<u16, 4>::try_from_fixed(off_x).unwrap(),
                             off_y: Fixed::<u16, 4>::try_from_fixed(off_y).unwrap(),
+                            upscaled_origin: None,
+                            sample_upscaled: false,
                         };
                         let geometry = geometry.transformed(self.rotation);
                         match &glyph.alpha_map {

@@ -438,6 +438,26 @@ pub(super) fn texture_offset(
     Fixed(((offset.0 as i64 + step.0 as i64 * index as i64).rem_euclid(modulus)) as i32)
 }
 
+pub(super) fn texture_step_less_than_one(step: TextureStep) -> bool {
+    step.0.unsigned_abs() < TextureStep::from_integer(1).0.unsigned_abs()
+}
+
+pub(super) fn texture_sample_index(pos: TextureStep, delta: TextureStep) -> i32 {
+    if texture_step_less_than_one(delta) { (pos + delta / 2).truncate() } else { pos.truncate() }
+}
+
+pub(super) fn texture_source_index(
+    pos: TextureStep,
+    delta: TextureStep,
+    source_size: i32,
+) -> usize {
+    if texture_step_less_than_one(delta) {
+        texture_sample_index(pos, delta).rem_euclid(source_size) as usize
+    } else {
+        (texture_sample_index(pos, delta) % source_size) as usize
+    }
+}
+
 pub(super) fn texture_step(source_size: i32, destination_size: i32) -> TextureStep {
     let step = Fixed::<i32, TEXTURE_STEP_SHIFT>::from_fraction(source_size, destination_size);
     let last = step.0 as i64 * (destination_size - 1) as i64;
@@ -457,11 +477,15 @@ pub struct SceneTextureExtra {
     /// Offset in source pixels of the image pixel drawn at `SceneItem::pos`.
     pub off_x: Fixed<u16, 4>,
     pub off_y: Fixed<u16, 4>,
+    /// Full-precision sampling origin for large non-tiled upscales (Q4 `off_x`/`off_y` alone are not enough).
+    pub upscaled_origin: Option<(TextureStep, TextureStep)>,
     /// Color to colorize. When not transparent, consider that the image is an alpha map and always use that color.
     /// The alpha of this color is ignored. (it is supposed to be mixed in `Self::alpha`)
     pub colorize: Color,
     pub alpha: u8,
     pub rotation: RenderingRotation,
+    /// Half-step texture indexing for large non-tiled upscales only.
+    pub sample_upscaled: bool,
 }
 
 impl SceneTextureExtra {
@@ -518,17 +542,31 @@ impl SceneTextureExtra {
         Fixed::<u16, 8>::try_from_fixed(dx).ok()?;
         Fixed::<u16, 8>::try_from_fixed(dy).ok()?;
 
-        let (off_x, off_y) = if texture.tiling.is_some() {
+        let large_upscale = texture.tiling.is_none()
+            && (texture_step_less_than_one(dx) || texture_step_less_than_one(dy))
+            && (dst_width as i32 >= source_size.width.saturating_mul(10)
+                || dst_height as i32 >= source_size.height.saturating_mul(10));
+        let (off_x, off_y, upscaled_origin) = if texture.tiling.is_some() {
             let off_x = texture_offset(Fixed::default(), dx, offset.x, source_size.width);
             let off_y = texture_offset(Fixed::default(), dy, offset.y, source_size.height);
             (
                 Fixed::<u16, 4>::try_from_fixed(off_x).ok()?,
                 Fixed::<u16, 4>::try_from_fixed(off_y).ok()?,
+                None,
+            )
+        } else if large_upscale {
+            let origin_x = texture_offset(Fixed::default(), dx, offset.x, source_size.width);
+            let origin_y = texture_offset(Fixed::default(), dy, offset.y, source_size.height);
+            (
+                Fixed::<u16, 4>::try_from_fixed(origin_x).unwrap_or_default(),
+                Fixed::<u16, 4>::try_from_fixed(origin_y).unwrap_or_default(),
+                Some((origin_x, origin_y)),
             )
         } else {
             (
                 Fixed::<u16, 4>::try_from_fixed(dx * offset.x).ok()?,
                 Fixed::<u16, 4>::try_from_fixed(dy * offset.y).ok()?,
+                None,
             )
         };
 
@@ -541,6 +579,8 @@ impl SceneTextureExtra {
                 dy,
                 off_x,
                 off_y,
+                upscaled_origin,
+                sample_upscaled: large_upscale,
             },
             clipped_geometry.to_rect().cast(),
         ))
